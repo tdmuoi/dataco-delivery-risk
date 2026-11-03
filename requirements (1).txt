@@ -1,0 +1,9 @@
+streamlit>=1.50
+pandas
+altair
+joblib
+scikit-learn==1.6.1
+xgboost==3.4.1
+google-cloud-bigquery
+db-dtypes
+google-genai

@@ -1,0 +1,6 @@
+.streamlit/secrets.toml
+*.json
+!options.json
+!world-110m.json
+.venv/
+__pycache__/
