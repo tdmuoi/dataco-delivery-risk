@@ -305,8 +305,7 @@ def page_ranking():
 
     # ---------- Tiêu đề + chọn phương thức
     left, right = st.columns([1.5, 2], vertical_alignment="bottom")
-    left.markdown('<div class="ov-title">Xếp hạng rủi ro tuyến</div>'
-                  '<div class="ov-sub">Tuyến = khu vực nhận hàng × phương thức vận chuyển</div>',
+    left.markdown('<div class="ov-title">Xếp hạng rủi ro tuyến</div>',
                   unsafe_allow_html=True)
     with right:
         mode = st.segmented_control("Phương thức", ["Tất cả"] + MODE_ORDER, default="Tất cả",
@@ -344,8 +343,6 @@ def page_ranking():
     with a:
         with st.container(key="card_map"):
             card_header(f"Bản đồ tuyến giao hàng - {mode}",
-                        "Đường đỏ đậm là tuyến hay trễ, đường dày là tuyến có nhiều tiền rủi ro. Số 1, 2, 3 đánh dấu "
-                        "các tuyến cần ưu tiên. Bản đồ chỉ để minh họa, không phải đường đi thực tế.")
             st.altair_chart(route_map(by_region(d), top), width="stretch")
     with b:
         with st.container(key="card_alert"):
@@ -363,8 +360,7 @@ def page_ranking():
     x, y = st.columns([1.45, 1], gap="medium")
     with x:
         with st.container(key="card_matrix"):
-            card_header("Ma trận ưu tiên",
-                        "Mỗi chấm là một tuyến, chấm to là tuyến nhiều đơn. Tuyến nằm trong vùng đỏ nhạt vừa hay trễ vừa mất nhiều tiền.")
+            card_header("Ma trận ưu tiên",)
             m = matrix_chart(d)
             if m is not None:
                 st.altair_chart(m, width="stretch")
