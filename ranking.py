@@ -342,11 +342,11 @@ def page_ranking():
     a, b = st.columns([2.1, 1], gap="medium")
     with a:
         with st.container(key="card_map"):
-            card_header(f"Bản đồ tuyến giao hàng - {mode}",
+            card_header(f"Bản đồ tuyến giao hàng - {mode}")
             st.altair_chart(route_map(by_region(d), top), width="stretch")
     with b:
         with st.container(key="card_alert"):
-            card_header("Cảnh báo ưu tiên", "Ba tuyến có điểm rủi ro cao nhất hiện tại")
+            card_header("Cảnh báo ưu tiên")
             if top.empty:
                 st.caption("Các tuyến đang chọn không đủ dữ liệu để xếp hạng.")
             else:
@@ -360,20 +360,20 @@ def page_ranking():
     x, y = st.columns([1.45, 1], gap="medium")
     with x:
         with st.container(key="card_matrix"):
-            card_header("Ma trận ưu tiên",)
+            card_header("Ma trận ưu tiên")
             m = matrix_chart(d)
             if m is not None:
                 st.altair_chart(m, width="stretch")
     with y:
         with st.container(key="card_heat"):
-            card_header("Bản đồ nhiệt các tuyến", "Số trong ô là % đơn giao trễ, ô xám là tuyến chưa đủ dữ liệu")
+            card_header("Bản đồ nhiệt các tuyến")
             st.altair_chart(heatmap(d_all), width="stretch")
 
     # ---------- Hàng 4: bảng xếp hạng
     with st.container(key="card_table"):
         h1, h2 = st.columns([2, 1.4], vertical_alignment="center")
         with h1:
-            card_header("Bảng xếp hạng chi tiết", "Chọn cách xếp hạng ở các nút bên phải")
+            card_header("Bảng xếp hạng chi tiết")
         with h2:
             sort_by = st.segmented_control("Xếp theo", ["Điểm rủi ro", "Tiền rủi ro", "Trong phương thức"],
                                            default="Điểm rủi ro", label_visibility="collapsed", key="rank_sort") \
