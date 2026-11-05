@@ -260,7 +260,7 @@ def _bigquery_client():
 def load_overview():
     client = _bigquery_client()
     if client is not None:
-        df, source = client.query(OVERVIEW_SQL).to_dataframe(), "BigQuery"
+        df, source = client.query(OVERVIEW_SQL).to_dataframe(create_bqstorage_client=False), "BigQuery"
     else:
         df, source = pd.read_csv(BASE / "overview_monthly.csv"), "CSV"
     df["year_month"] = df["year_month"].astype(str)
@@ -271,7 +271,7 @@ def load_overview():
 def load_route_risk():
     client = _bigquery_client()
     if client is not None:
-        return client.query("SELECT * FROM `dw-dataco-513010.gold.route_risk_expected`").to_dataframe()
+        return client.query("SELECT * FROM `dw-dataco-513010.gold.route_risk_expected`").to_dataframe(create_bqstorage_client=False)
     return pd.read_csv(BASE / "route_risk.csv")
 
 
@@ -505,9 +505,7 @@ def page_overview():
 
     # ---------- Tiêu đề
     left, right = st.columns([3, 2], vertical_alignment="center")
-    left.markdown('<div class="ov-title">Tổng quan giao hàng</div>'
-                  f'<div class="ov-sub">Tỷ lệ trễ tính trên các đơn không bị hủy - dữ liệu lấy từ tầng Gold ({source})</div>',
-                  unsafe_allow_html=True)
+    left.markdown('<div class="ov-title">Tổng quan giao hàng</div>', unsafe_allow_html=True)
     scope = ", ".join(markets) if markets else "Tất cả thị trường"
     right.markdown(f'<div style="text-align:right"><span class="ov-chip">{ym_label(start)} - {ym_label(end)}</span>'
                    f'<span class="ov-chip">{scope}</span></div>', unsafe_allow_html=True)
@@ -544,7 +542,7 @@ def page_overview():
         with st.container(key="card_trend"):
             h1, h2 = st.columns([3, 1.1], vertical_alignment="center")
             with h1:
-                card_header("Xu hướng tỷ lệ giao trễ", "Rê chuột vào từng điểm để xem số đơn của kỳ đó")
+                card_header("Xu hướng tỷ lệ giao trễ")
             with h2:
                 period = st.segmented_control("Kỳ", ["Tháng", "Quý"], default="Tháng",
                                               label_visibility="collapsed", key="period")
@@ -552,7 +550,7 @@ def page_overview():
             st.altair_chart(trend_chart(to_period(monthly, by_q), by_q), width="stretch")
     with b:
         with st.container(key="card_truck"):
-            card_header("Tỷ lệ giao trễ", "Phần tô đỏ trên thùng xe là tỷ lệ đơn giao trễ")
+            card_header("Tỷ lệ giao trễ")
             st.markdown(truck_svg(tot["late_rate"]), unsafe_allow_html=True)
             on_time = tot["n_not_canceled"] - tot["n_late"]
             st.markdown(
@@ -568,11 +566,11 @@ def page_overview():
     x, y, z = st.columns([1.25, 1.1, 1], gap="medium")
     with x:
         with st.container(key="card_mode"):
-            card_header("Tỷ lệ trễ theo phương thức", "Bên cạnh tên là số ngày giao đã cam kết với khách")
+            card_header("Tỷ lệ trễ theo phương thức")
             st.altair_chart(mode_chart(by_mode, mode_days), width="stretch")
     with y:
         with st.container(key="card_market"):
-            card_header("Doanh thu chịu rủi ro theo thị trường", "Phần trăm bên phải là tỷ trọng trong tổng tiền rủi ro")
+            card_header("Doanh thu chịu rủi ro theo thị trường")
             st.altair_chart(market_chart(by_market), width="stretch")
     with z:
         big, lead, items = build_insights(f, by_mode, by_market, monthly, mode_days)
