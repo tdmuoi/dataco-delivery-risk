@@ -25,9 +25,11 @@ MAX_ROWS = 500
 TIMEOUT = 30                       # mỗi bước chờ tối đa 30 giây
 # Mô hình AI: dùng Gemini trước (nếu có GEMINI_API_KEY), quá tải thì tự chuyển sang mô hình Gemini khác,
 # rồi sang Groq (nếu có GROQ_API_KEY). Muốn đổi mô hình, thêm GEMINI_MODEL = "..." / GROQ_MODEL = "..." vào secrets.toml.
-GEMINI_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-flash-latest"]
 GROQ_MODELS = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b"]
-BUSY_WORDS = ("503", "unavailable", "overloaded", "high demand", "429", "resource_exhausted", "rate", "timed out", "timeout")
+BUSY_WORDS = ("503", "unavailable", "overloaded", "high demand", "429", "resource_exhausted", "rate",
+              "timed out", "timeout", "504", "deadline", "500", "internal")
+MAX_WAIT = 75                       # tổng thời gian tối đa cho một lần gọi AI (kể cả thử mô hình dự phòng)
 
 SAMPLES = [
     "Phương thức vận chuyển nào có tỷ lệ giao trễ cao nhất?",
@@ -158,7 +160,10 @@ def _secret(name):
 
 def providers():
     """Danh sách AI theo thứ tự thử: Gemini trước, Groq dự phòng (chỉ những cái có key)."""
-    return [name for name, key in (("Gemini", "GEMINI_API_KEY"), ("Groq", "GROQ_API_KEY")) if _secret(key)]
+    order = [name for name, key in (("Gemini", "GEMINI_API_KEY"), ("Groq", "GROQ_API_KEY")) if _secret(key)]
+    if _secret("AI_PRIMARY") == "Groq" and "Groq" in order:      # muốn Groq chạy trước thì thêm AI_PRIMARY = "Groq"
+        order = ["Groq"] + [p for p in order if p != "Groq"]
+    return order
 
 
 def provider():
@@ -193,36 +198,52 @@ def _friendly(e):
     return f"Không gọi được AI: {str(e)[:300]}"
 
 
-def _call_gemini(system, prompt, json_mode):
+def _gemini_config(model, system, json_mode, fast):
+    """fast=True: tắt hoặc giảm "suy nghĩ" cho nhanh (dòng 2.5 dùng thinking_budget, dòng 3 dùng thinking_level)."""
     from google.genai import types
-    models = [_secret("GEMINI_MODEL")] if _secret("GEMINI_MODEL") else GEMINI_MODELS
+    kw = dict(system_instruction=system, temperature=0.1,
+              response_mime_type="application/json" if json_mode else "text/plain")
+    if fast:
+        try:
+            kw["thinking_config"] = (types.ThinkingConfig(thinking_budget=0) if "2.5" in model
+                                     else types.ThinkingConfig(thinking_level="low"))
+        except Exception:
+            pass
+    return types.GenerateContentConfig(**kw)
+
+
+def _call_gemini(system, prompt, json_mode, deadline):
+    import time
+    first = _secret("GEMINI_MODEL")
+    models = ([first] if first else []) + [m for m in GEMINI_MODELS if m != first]
     last = None
     for model in models:
-        cfg = types.GenerateContentConfig(
-            system_instruction=system, temperature=0.1,
-            response_mime_type="application/json" if json_mode else "text/plain",
-            thinking_config=types.ThinkingConfig(thinking_budget=0))      # tắt "suy nghĩ" cho nhanh
-        try:
-            return _gemini().models.generate_content(model=model, contents=prompt, config=cfg).text
-        except Exception as e:
-            last = e
-            if "thinking" in str(e).lower():      # model không cho tắt "suy nghĩ" -> chạy với mặc định
-                cfg.thinking_config = None
-                try:
-                    return _gemini().models.generate_content(model=model, contents=prompt, config=cfg).text
-                except Exception as e2:
-                    last = e2
-            m = str(last).lower()
-            if not (_is_busy(last) or "not found" in m or "404" in m):
-                break                             # lỗi khác (sai key...) thì không thử tiếp
-    raise last
+        if time.time() > deadline:
+            break
+        for fast in (True, False):              # lỗi 400 do cấu hình "suy nghĩ" -> thử lại không kèm cấu hình
+            try:
+                cfg = _gemini_config(model, system, json_mode, fast)
+                return _gemini().models.generate_content(model=model, contents=prompt, config=cfg).text
+            except Exception as e:
+                last = e
+                m = str(e).lower()
+                if fast and ("400" in m or "invalid" in m or "thinking" in m):
+                    continue
+                break
+        m = str(last).lower()
+        if not (_is_busy(last) or "not found" in m or "404" in m or "400" in m or "invalid" in m):
+            break                               # lỗi khác (sai key...) thì không thử tiếp
+    raise last or TimeoutError("timeout: AI phản hồi quá lâu")
 
 
-def _call_groq(system, prompt, json_mode):
+def _call_groq(system, prompt, json_mode, deadline):
     models = [_secret("GROQ_MODEL")] if _secret("GROQ_MODEL") else GROQ_MODELS
     extra = {"response_format": {"type": "json_object"}} if json_mode else {}
     last = None
     for model in models:
+        import time
+        if time.time() > deadline:
+            break
         try:
             r = _groq().chat.completions.create(
                 model=model, temperature=0.1, max_tokens=1200,
@@ -232,7 +253,7 @@ def _call_groq(system, prompt, json_mode):
             last = e
             if not (_is_busy(e) or "model" in str(e).lower()):
                 break
-    raise last
+    raise last or TimeoutError("timeout: AI phản hồi quá lâu")
 
 
 def _generate(system, prompt, json_mode):
@@ -240,10 +261,12 @@ def _generate(system, prompt, json_mode):
     order = providers()
     if not order:
         raise RuntimeError("Chưa có API key của AI trong secrets.toml.")
+    import time
+    deadline = time.time() + MAX_WAIT
     last = None
     for name in order:
         try:
-            return (_call_gemini if name == "Gemini" else _call_groq)(system, prompt, json_mode)
+            return (_call_gemini if name == "Gemini" else _call_groq)(system, prompt, json_mode, deadline)
         except Exception as e:
             last = e
     raise RuntimeError(_friendly(last))
