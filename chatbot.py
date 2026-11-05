@@ -23,10 +23,11 @@ ALLOWED_TABLES = {"wide_order_items", "route_scorecard", "route_scorecard_monthl
 MAX_BYTES = 1_000_000_000          # mỗi câu hỏi quét tối đa 1 GB (bảng lớn nhất chỉ vài chục MB)
 MAX_ROWS = 500
 TIMEOUT = 30                       # mỗi bước chờ tối đa 30 giây
-# Mô hình AI: app dùng nhà cung cấp nào có key trong secrets.toml (ưu tiên Groq vì nhanh và miễn phí).
-# Muốn đổi mô hình, thêm dòng GROQ_MODEL = "..." hoặc GEMINI_MODEL = "..." vào secrets.toml.
+# Mô hình AI: dùng Gemini trước (nếu có GEMINI_API_KEY), quá tải thì tự chuyển sang mô hình Gemini khác,
+# rồi sang Groq (nếu có GROQ_API_KEY). Muốn đổi mô hình, thêm GEMINI_MODEL = "..." / GROQ_MODEL = "..." vào secrets.toml.
+GEMINI_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 GROQ_MODELS = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b"]
-GEMINI_MODELS = ["gemini-flash-latest", "gemini-2.5-flash"]
+BUSY_WORDS = ("503", "unavailable", "overloaded", "high demand", "429", "resource_exhausted", "rate", "timed out", "timeout")
 
 SAMPLES = [
     "Phương thức vận chuyển nào có tỷ lệ giao trễ cao nhất?",
@@ -155,13 +156,17 @@ def _secret(name):
         return None
 
 
+def providers():
+    """Danh sách AI theo thứ tự thử: Gemini trước, Groq dự phòng (chỉ những cái có key)."""
+    return [name for name, key in (("Gemini", "GEMINI_API_KEY"), ("Groq", "GROQ_API_KEY")) if _secret(key)]
+
+
 def provider():
-    """Tên nhà cung cấp AI đang dùng: "Groq" hoặc "Gemini" (hoặc None nếu chưa có key)."""
-    if _secret("GROQ_API_KEY"):
-        return "Groq"
-    if _secret("GEMINI_API_KEY"):
-        return "Gemini"
-    return None
+    """Tên hiển thị dưới tiêu đề trang, vd "Gemini (dự phòng: Groq)"."""
+    p = providers()
+    if not p:
+        return None
+    return p[0] + (f" (dự phòng: {', '.join(p[1:])})" if len(p) > 1 else "")
 
 
 @st.cache_resource
@@ -177,55 +182,71 @@ def _gemini():
     return genai.Client(api_key=_secret("GEMINI_API_KEY"), http_options=types.HttpOptions(timeout=TIMEOUT * 1000))
 
 
+def _is_busy(e):
+    m = str(e).lower()
+    return any(w in m for w in BUSY_WORDS)
+
+
 def _friendly(e):
-    msg = str(e)
-    if "429" in msg or "rate" in msg.lower() or "RESOURCE_EXHAUSTED" in msg:
-        return "AI đang quá tải hoặc hết lượt miễn phí trong phút này. Cậu đợi khoảng 1 phút rồi hỏi lại nhé."
-    if "timed out" in msg.lower() or "timeout" in msg.lower():
-        return "AI phản hồi quá lâu nên mình đã dừng. Cậu thử hỏi lại nhé."
-    return f"Không gọi được AI: {msg[:300]}"
+    if _is_busy(e):
+        return "AI đang quá tải hoặc hết lượt miễn phí. Cậu đợi khoảng 1 phút rồi hỏi lại nhé."
+    return f"Không gọi được AI: {str(e)[:300]}"
 
 
-def _generate(system, prompt, json_mode):
-    name = provider()
-    if name == "Groq":
-        models = [_secret("GROQ_MODEL")] if _secret("GROQ_MODEL") else GROQ_MODELS
-        extra = {"response_format": {"type": "json_object"}} if json_mode else {}
-        last = None
-        for model in models:
-            try:
-                r = _groq().chat.completions.create(
-                    model=model, temperature=0.1, max_tokens=1200,
-                    messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}], **extra)
-                return r.choices[0].message.content
-            except Exception as e:      # chỉ thử model khác khi model không tồn tại
-                last = e
-                if "model" not in str(e).lower():
-                    break
-        raise RuntimeError(_friendly(last))
-    if name == "Gemini":
-        from google.genai import types
+def _call_gemini(system, prompt, json_mode):
+    from google.genai import types
+    models = [_secret("GEMINI_MODEL")] if _secret("GEMINI_MODEL") else GEMINI_MODELS
+    last = None
+    for model in models:
         cfg = types.GenerateContentConfig(
             system_instruction=system, temperature=0.1,
             response_mime_type="application/json" if json_mode else "text/plain",
             thinking_config=types.ThinkingConfig(thinking_budget=0))      # tắt "suy nghĩ" cho nhanh
-        models = [_secret("GEMINI_MODEL")] if _secret("GEMINI_MODEL") else GEMINI_MODELS
-        last = None
-        for model in models:
-            try:
-                return _gemini().models.generate_content(model=model, contents=prompt, config=cfg).text
-            except Exception as e:
-                last = e
-                if "thinking" in str(e).lower():          # model không cho tắt "suy nghĩ" -> chạy với mặc định
-                    cfg.thinking_config = None
-                    try:
-                        return _gemini().models.generate_content(model=model, contents=prompt, config=cfg).text
-                    except Exception as e2:
-                        last = e2
-                if "not found" not in str(last).lower() and "404" not in str(last):
-                    break
-        raise RuntimeError(_friendly(last))
-    raise RuntimeError("Chưa có API key của AI trong secrets.toml.")
+        try:
+            return _gemini().models.generate_content(model=model, contents=prompt, config=cfg).text
+        except Exception as e:
+            last = e
+            if "thinking" in str(e).lower():      # model không cho tắt "suy nghĩ" -> chạy với mặc định
+                cfg.thinking_config = None
+                try:
+                    return _gemini().models.generate_content(model=model, contents=prompt, config=cfg).text
+                except Exception as e2:
+                    last = e2
+            m = str(last).lower()
+            if not (_is_busy(last) or "not found" in m or "404" in m):
+                break                             # lỗi khác (sai key...) thì không thử tiếp
+    raise last
+
+
+def _call_groq(system, prompt, json_mode):
+    models = [_secret("GROQ_MODEL")] if _secret("GROQ_MODEL") else GROQ_MODELS
+    extra = {"response_format": {"type": "json_object"}} if json_mode else {}
+    last = None
+    for model in models:
+        try:
+            r = _groq().chat.completions.create(
+                model=model, temperature=0.1, max_tokens=1200,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}], **extra)
+            return r.choices[0].message.content
+        except Exception as e:
+            last = e
+            if not (_is_busy(e) or "model" in str(e).lower()):
+                break
+    raise last
+
+
+def _generate(system, prompt, json_mode):
+    """Gọi AI theo thứ tự providers(); cái trước lỗi thì chuyển sang cái sau."""
+    order = providers()
+    if not order:
+        raise RuntimeError("Chưa có API key của AI trong secrets.toml.")
+    last = None
+    for name in order:
+        try:
+            return (_call_gemini if name == "Gemini" else _call_groq)(system, prompt, json_mode)
+        except Exception as e:
+            last = e
+    raise RuntimeError(_friendly(last))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -302,7 +323,7 @@ def run_sql(sql):
         raise RuntimeError("Chưa cấu hình khóa BigQuery trong secrets.toml.")
     job = client.query(sql, job_config=bigquery.QueryJobConfig(
         maximum_bytes_billed=MAX_BYTES, default_dataset=DATASET))   # quét quá 1 GB thì BigQuery tự từ chối
-    return job.result(timeout=TIMEOUT).to_dataframe().head(MAX_ROWS)
+    return job.result(timeout=TIMEOUT).to_dataframe(create_bqstorage_client=False).head(MAX_ROWS)
 
 
 def answer(question, history, step=lambda text: None):
@@ -376,9 +397,7 @@ def show_reply(msg):
 
 def page_chatbot():
     st.markdown(PAGE_CSS, unsafe_allow_html=True)
-    st.markdown('<div class="ov-title">Trợ lý dữ liệu</div>'
-                '<div class="ov-sub">Hỏi bằng tiếng Việt - trợ lý viết SQL và chạy trên tầng Gold của BigQuery'
-                f'{" - AI: " + provider() if provider() else ""}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ov-title">Trợ lý dữ liệu</div>', unsafe_allow_html=True)
     st.write("")
 
     try:
