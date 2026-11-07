@@ -117,7 +117,9 @@ Quy tắc viết SQL (BigQuery Standard SQL):
 - Luôn có ORDER BY hợp lý và LIMIT tối đa 50.
 
 Trả về DUY NHẤT một JSON:
-- Nếu câu hỏi cần dữ liệu: {{"sql": "<câu SQL>"}}
+- Nếu câu hỏi cần dữ liệu: {{"sql": "<câu SQL>", "ten_cot": {{"<tên cột trong SQL>": "<tên tiếng Việt có dấu>"}}}}
+  Trong "ten_cot", ghi tên hiển thị tiếng Việt có dấu, ngắn gọn cho TỪNG cột kết quả,
+  vd {{"phuong_thuc": "Phương thức", "so_don": "Số đơn", "ty_le_tre": "Tỷ lệ trễ"}}.
 - Nếu là câu hỏi khái niệm (vd "First Class là gì", "điểm rủi ro tính thế nào"): trả lời dựa trên phần Thuật ngữ, 2-3 câu ngắn:
   {{"sql": null, "reply": "<câu trả lời>"}}
 - Nếu là lời chào hoặc dữ liệu không có thông tin để trả lời: {{"sql": null, "reply": "<trả lời ngắn, gợi ý câu hỏi phù hợp>"}}
@@ -363,7 +365,8 @@ def answer(question, history, step=lambda text: None):
             step("Đang chạy trên BigQuery...")
             df = run_sql(sql)
             step("Đang tóm tắt kết quả...")
-            return {"q": question, "sql": sql, "df": df, "text": ask_answer(question, sql, df)}
+            return {"q": question, "sql": sql, "df": df, "labels": plan.get("ten_cot") or {},
+                    "text": ask_answer(question, sql, df)}
         except RuntimeError:                    # lỗi gọi AI (quá tải, hết giờ) -> báo luôn, không thử lại
             raise
         except Exception as e:
@@ -379,43 +382,69 @@ def answer(question, history, step=lambda text: None):
 
 
 # ------------------------------------------------------------------ 4. HIỂN THỊ
-def auto_chart(df):
-    """Vẽ biểu đồ cột nếu kết quả có 1 cột chữ + ít nhất 1 cột số và 2-25 dòng."""
+# Tên cột hay gặp -> tên tiếng Việt có dấu (dùng khi AI không trả về "ten_cot")
+COL_VI = {
+    "phuong_thuc": "Phương thức", "shipping_mode": "Phương thức", "thi_truong": "Thị trường", "market": "Thị trường",
+    "khu_vuc": "Khu vực", "order_region": "Khu vực", "quoc_gia": "Quốc gia", "order_country": "Quốc gia",
+    "tuyen": "Tuyến", "route_name": "Tuyến", "nhom_hang": "Nhóm hàng", "category_name": "Nhóm hàng",
+    "bo_phan": "Bộ phận", "department_name": "Bộ phận", "phan_khuc": "Phân khúc khách hàng",
+    "customer_segment": "Phân khúc khách hàng", "thanh_toan": "Hình thức thanh toán", "payment_type": "Hình thức thanh toán",
+    "nam": "Năm", "order_year": "Năm", "thang": "Tháng", "order_year_month": "Tháng", "year_month": "Tháng",
+    "quy": "Quý", "gio": "Giờ đặt hàng", "thu": "Thứ trong tuần", "cuoi_tuan": "Cuối tuần",
+    "so_don": "Số đơn", "so_don_tre": "Số đơn trễ", "so_don_huy": "Số đơn hủy", "n_orders": "Số đơn",
+    "ty_le_tre": "Tỷ lệ trễ", "late_rate": "Tỷ lệ trễ", "ty_le_huy": "Tỷ lệ hủy", "cancel_rate": "Tỷ lệ hủy",
+    "tien_rui_ro": "Tiền rủi ro (USD)", "revenue_at_risk": "Doanh thu chịu rủi ro (USD)",
+    "expected_revenue_at_risk": "Tiền rủi ro kỳ vọng (USD)", "doanh_thu": "Doanh thu (USD)",
+    "risk_score": "Điểm rủi ro", "diem_rui_ro": "Điểm rủi ro", "risk_rank": "Hạng", "hang": "Hạng",
+    "risk_tier": "Mức rủi ro", "muc_rui_ro": "Mức rủi ro", "so_ngay_tre_tb": "Số ngày trễ trung bình",
+    "avg_delay_days": "Số ngày trễ trung bình", "ma_don": "Mã đơn", "order_id": "Mã đơn",
+}
+
+
+def vi_columns(df, labels):
+    """Đổi tên cột kết quả sang tiếng Việt: ưu tiên tên AI đặt, sau đó bảng COL_VI, cuối cùng bỏ dấu gạch dưới."""
+    labels = labels or {}
+    def name(c):
+        return labels.get(c) or COL_VI.get(c) or c.replace("_", " ").capitalize()
+    out = df.rename(columns={c: name(c) for c in df.columns})
+    if out.columns.duplicated().any():          # tránh trùng tên sau khi đổi
+        out.columns = [f"{c} ({i})" if out.columns[:i].tolist().count(c) else c for i, c in enumerate(out.columns)]
+    return out
+
+
+def auto_chart(df, raw_cols):
+    """Vẽ biểu đồ cột nếu kết quả có 1 cột chữ + ít nhất 1 cột số và 2-25 dòng.
+    df đã đổi tên cột tiếng Việt; raw_cols là tên cột gốc (để nhận biết cột tỷ lệ)."""
     if df is None or not 2 <= len(df) <= 25:
         return None
+    raw = dict(zip(df.columns, raw_cols))
     text_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     if len(text_cols) != 1 or not num_cols:
         return None
     cat = text_cols[0]
-    val = next((c for c in num_cols if "ty_le" in c or "rate" in c), num_cols[-1])
+    is_rate_name = lambda c: "ty_le" in raw[c] or "rate" in raw[c] or "Tỷ lệ" in c
+    val = next((c for c in num_cols if is_rate_name(c)), num_cols[-1])
     d = df[[cat, val]].copy()
     d[cat] = d[cat].astype(str)
-    is_rate = d[val].between(0, 1).all() and ("ty_le" in val or "rate" in val)
-    d["is_top"] = d[val] == d[val].max()
+    is_rate = d[val].between(0, 1).all() and is_rate_name(val)
+    d["Cao nhất"] = d[val] == d[val].max()
     order = d.sort_values(val, ascending=False)[cat].tolist()
-    if "thang" in cat or "month" in cat or "nam" == cat or "year" in cat:
+    rc = raw[cat]
+    if any(k in rc for k in ("thang", "month", "year", "quy")) or rc in ("nam", "gio", "thu"):
         order = sorted(d[cat].tolist())
     bars = alt.Chart(d).mark_bar(cornerRadius=8, size=16).encode(
-        y=alt.Y(f"{cat}:N", sort=order, title=None, axis=alt.Axis(labelColor=INK, labelLimit=220, labelOverlap=False)),
-        x=alt.X(f"{val}:Q", title=None, axis=alt.Axis(format="%" if is_rate else "~s")),
-        color=alt.condition("datum.is_top", alt.value(ACCENT), alt.value("#F2A6A4")),
-        tooltip=[alt.Tooltip(f"{cat}:N"), alt.Tooltip(f"{val}:Q", format=".1%" if is_rate else ",.2f")])
+        y=alt.Y(field=cat, type="nominal", sort=order, title=None,
+                axis=alt.Axis(labelColor=INK, labelLimit=220, labelOverlap=False)),
+        x=alt.X(field=val, type="quantitative", title=None, axis=alt.Axis(format="%" if is_rate else "~s")),
+        color=alt.condition("datum['Cao nhất']", alt.value(ACCENT), alt.value("#F2A6A4")),
+        tooltip=[alt.Tooltip(field=cat, type="nominal"),
+                 alt.Tooltip(field=val, type="quantitative", format=".1%" if is_rate else ",.2f")])
     return clean(bars, max(150, 40 * len(d)))
 
 
 def show_reply(msg):
     st.markdown(msg["text"])
-    df = msg.get("df")
-    if df is not None and len(df):
-        chart = auto_chart(df)
-        if chart is not None:
-            st.altair_chart(chart, width="stretch")
-        with st.expander(f"Bảng số liệu ({len(df)} dòng)"):
-            st.dataframe(df, hide_index=True, width="stretch")
-    if msg.get("sql"):
-        with st.expander("Câu SQL đã chạy trên BigQuery"):
-            st.code(msg["sql"], language="sql")
 
 
 def page_chatbot():
