@@ -17,7 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from overview import (ACCENT, BG, INK, MODE_ORDER, MUTED, TIER_COLOR, TIER_ORDER, TIER_VI,
-                      card_header, clean, kpi_card, load_mode_days, load_route_risk, vn_int, vn_pct)
+                      F, card_header, clean, kpi_card, load_mode_days, load_route_risk, vn_int, vn_pct)
 
 # ============================================================ 1. HẰNG SỐ
 # Kho xuất hàng: dữ liệu không có tọa độ kho, nên dùng vị trí cửa hàng phổ biến nhất
@@ -125,52 +125,58 @@ def arc_points(lat0, lon0, lat1, lon1, bend=0.22, n=40):
     return lon, np.clip(lat, -58, 80)
 
 
-def route_map(reg, top):
-    reg = reg[reg["order_region"].isin(REGION_XY)].copy()
-    reg["lat"] = reg["order_region"].map(lambda r: REGION_XY[r][0])
-    reg["lon"] = reg["order_region"].map(lambda r: REGION_XY[r][1])
-    rows = []
-    for r in reg.itertuples():
-        lon, lat = arc_points(HUB["lat"], HUB["lon"], r.lat, r.lon)
-        rows += [{"region": r.order_region, "i": i, "lon": a, "lat": b, "late_rate": r.late_rate, "money": r.money}
-                 for i, (a, b) in enumerate(zip(lon, lat))]
-    lines = pd.DataFrame(rows)
+MONEY = "Tiền rủi ro kỳ vọng (USD)"
+TIER_VI_COLOR = {TIER_VI[k]: v for k, v in TIER_COLOR.items()}     # màu theo tên mức tiếng Việt
 
-    color = alt.Color("late_rate:Q", scale=alt.Scale(range=["#F8C9C8", ACCENT, "#B3261E"]), legend=None)
-    tip = [alt.Tooltip("order_region:N", title="Khu vực"), alt.Tooltip("late_rate:Q", title="Tỷ lệ trễ", format=".1%"),
-           alt.Tooltip("money:Q", title="Tiền rủi ro kỳ vọng (USD)", format=",.0f"),
-           alt.Tooltip("n_orders:Q", title="Số đơn", format=",")]
+
+def route_map(reg, top):
+    reg = reg[reg["order_region"].isin(REGION_XY)]
+    reg = reg[["order_region", "n_orders", "late_rate", "money"]].rename(columns={
+        "order_region": "Khu vực", "n_orders": "Số đơn", "late_rate": "Tỷ lệ trễ", "money": MONEY})
+    reg = reg.round({"Tỷ lệ trễ": 4, MONEY: 0})
+    reg["Vĩ độ"] = reg["Khu vực"].map(lambda r: REGION_XY[r][0])
+    reg["Kinh độ"] = reg["Khu vực"].map(lambda r: REGION_XY[r][1])
+    rows = []
+    for r in reg.itertuples(index=False):
+        lon, lat = arc_points(HUB["lat"], HUB["lon"], r[reg.columns.get_loc("Vĩ độ")], r[reg.columns.get_loc("Kinh độ")])
+        rows += [{"Khu vực": r[0], "Thứ tự điểm": i, "Kinh độ": a, "Vĩ độ": b,
+                  "Tỷ lệ trễ": r[2], MONEY: r[3]} for i, (a, b) in enumerate(zip(lon, lat))]
+    lines = pd.DataFrame(rows)
+    geo = dict(longitude=alt.Longitude(**F("Kinh độ", "Q")), latitude=alt.Latitude(**F("Vĩ độ", "Q")))
+
+    color = alt.Color(**F("Tỷ lệ trễ", "Q"), scale=alt.Scale(range=["#F8C9C8", ACCENT, "#B3261E"]), legend=None)
+    tip = [alt.Tooltip(**F("Khu vực", "N")), alt.Tooltip(**F("Tỷ lệ trễ", "Q"), format=".1%"),
+           alt.Tooltip(**F(MONEY, "Q"), format=",.0f"), alt.Tooltip(**F("Số đơn", "Q"), format=",")]
 
     world = alt.Data(values=load_world(), format=alt.DataFormat(type="topojson", feature="countries"))
     land = alt.Chart(world).mark_geoshape(
         fill="#EDEDEB", stroke="#FFFFFF", strokeWidth=0.6).transform_filter("datum.id != 10")
     arcs = alt.Chart(lines).mark_line(strokeCap="round", opacity=.9).encode(
-        longitude="lon:Q", latitude="lat:Q", detail="region:N", order="i:Q", color=color,
-        size=alt.Size("money:Q", scale=alt.Scale(range=[1.2, 6]), legend=None))
+        **geo, detail=alt.Detail(**F("Khu vực", "N")), order=alt.Order(**F("Thứ tự điểm", "Q")), color=color,
+        size=alt.Size(**F(MONEY, "Q"), scale=alt.Scale(range=[1.2, 6]), legend=None))
     dest = alt.Chart(reg).mark_circle(opacity=1, stroke="#FFFFFF", strokeWidth=1.5).encode(
-        longitude="lon:Q", latitude="lat:Q", color=color,
-        size=alt.Size("n_orders:Q", scale=alt.Scale(range=[30, 160]), legend=None), tooltip=tip)
-    hub = pd.DataFrame([HUB])
+        **geo, color=color, size=alt.Size(**F("Số đơn", "Q"), scale=alt.Scale(range=[30, 160]), legend=None),
+        tooltip=tip)
+    hub = pd.DataFrame([{"Điểm xuất phát": HUB["name"], "Vĩ độ": HUB["lat"], "Kinh độ": HUB["lon"]}])
     hub_dot = alt.Chart(hub).mark_circle(size=170, color=INK, opacity=1, stroke="#FFFFFF", strokeWidth=2).encode(
-        longitude="lon:Q", latitude="lat:Q", tooltip=[alt.Tooltip("name:N", title="Điểm xuất phát")])
-    hub_txt = alt.Chart(hub).mark_text(align="left", dx=10, dy=12, fontSize=11, font="Inter", fontWeight=600, color=INK).encode(
-        longitude="lon:Q", latitude="lat:Q", text="name:N")
+        **geo, tooltip=[alt.Tooltip(**F("Điểm xuất phát", "N"))])
+    hub_txt = alt.Chart(hub).mark_text(align="left", dx=10, dy=12, fontSize=11, font="Inter", fontWeight=600,
+                                       color=INK).encode(**geo, text=alt.Text(**F("Điểm xuất phát", "N")))
     layers = [land, arcs, dest, hub_dot, hub_txt]
     if len(top):
-        t = top.copy()
-        t["lat"] = t["order_region"].map(lambda r: REGION_XY.get(r, (np.nan, np.nan))[0])
-        t["lon"] = t["order_region"].map(lambda r: REGION_XY.get(r, (np.nan, np.nan))[1])
+        t = top[["route_name", "order_region"]].copy()
+        t["Vĩ độ"] = t["order_region"].map(lambda r: REGION_XY.get(r, (np.nan, np.nan))[0])
+        t["Kinh độ"] = t["order_region"].map(lambda r: REGION_XY.get(r, (np.nan, np.nan))[1])
         k = t.groupby("order_region").cumcount()               # tách các số trùng một khu vực
-        t["lat"] = t["lat"] + k * 9
-        t["lon"] = t["lon"] - k * 9
-        t["num"] = range(1, len(t) + 1)
-        t["num"] = t["num"].astype(str)
+        t["Vĩ độ"] = t["Vĩ độ"] + k * 9
+        t["Kinh độ"] = t["Kinh độ"] - k * 9
+        t["Thứ tự ưu tiên"] = [str(n) for n in range(1, len(t) + 1)]
+        t = t.rename(columns={"route_name": "Tuyến"}).drop(columns="order_region")
         layers += [
             alt.Chart(t).mark_circle(size=420, color=ACCENT, opacity=1, stroke="#FFFFFF", strokeWidth=2.5).encode(
-                longitude="lon:Q", latitude="lat:Q",
-                tooltip=[alt.Tooltip("route_name:N", title="Tuyến"), alt.Tooltip("num:N", title="Thứ tự ưu tiên")]),
+                **geo, tooltip=[alt.Tooltip(**F("Tuyến", "N")), alt.Tooltip(**F("Thứ tự ưu tiên", "N"))]),
             alt.Chart(t).mark_text(color="#FFFFFF", fontWeight=700, fontSize=12, font="Inter").encode(
-                longitude="lon:Q", latitude="lat:Q", text="num:N"),
+                **geo, text=alt.Text(**F("Thứ tự ưu tiên", "N"))),
         ]
     chart = alt.layer(*layers).project(type="equalEarth").properties(height=400)
     return chart.configure_view(stroke=None)
@@ -178,76 +184,86 @@ def route_map(reg, top):
 
 def matrix_chart(d):
     """Ma trận ưu tiên: ngang = tỷ lệ trễ, dọc = tiền rủi ro kỳ vọng, chấm to = nhiều đơn."""
-    d = d.dropna(subset=["actual_late_rate"]).copy()
+    d = d.dropna(subset=["actual_late_rate"])
     if d.empty:
         return None
     x_mid = weighted_rate(d)
     y_mid = float(d["expected_revenue_at_risk"].median())
     x_max = 1.04
     y_max = float(d["expected_revenue_at_risk"].max()) * 1.12
-    d["short"] = d["route_name"]
-    top_lab = d.nlargest(3, "expected_revenue_at_risk")
-    tip = [alt.Tooltip("route_name:N", title="Tuyến"), alt.Tooltip("tier_vi:N", title="Mức"),
-           alt.Tooltip("actual_late_rate:Q", title="Trễ thực tế", format=".1%"),
-           alt.Tooltip("predicted_late_rate:Q", title="Trễ dự báo", format=".1%"),
-           alt.Tooltip("expected_revenue_at_risk:Q", title="Tiền rủi ro kỳ vọng", format=",.0f"),
-           alt.Tooltip("n_orders:Q", title="Số đơn", format=",")]
-    x = alt.X("actual_late_rate:Q", title="Tỷ lệ giao trễ thực tế →", scale=alt.Scale(domain=[0, x_max]),
+    d = d[["route_name", "tier_vi", "actual_late_rate", "predicted_late_rate", "expected_revenue_at_risk",
+           "n_orders"]].rename(columns={
+        "route_name": "Tuyến", "tier_vi": "Mức rủi ro", "actual_late_rate": "Tỷ lệ trễ thực tế",
+        "predicted_late_rate": "Tỷ lệ trễ dự báo", "expected_revenue_at_risk": MONEY, "n_orders": "Số đơn"})
+    d = d.round({"Tỷ lệ trễ thực tế": 4, "Tỷ lệ trễ dự báo": 4, MONEY: 0})
+    top_lab = d.nlargest(3, MONEY)
+    tip = [alt.Tooltip(**F(c, "N")) for c in ("Tuyến", "Mức rủi ro")] + [
+        alt.Tooltip(**F("Tỷ lệ trễ thực tế", "Q"), format=".1%"),
+        alt.Tooltip(**F("Tỷ lệ trễ dự báo", "Q"), format=".1%"),
+        alt.Tooltip(**F(MONEY, "Q"), format=",.0f"), alt.Tooltip(**F("Số đơn", "Q"), format=",")]
+    x = alt.X(**F("Tỷ lệ trễ thực tế", "Q"), title="Tỷ lệ giao trễ thực tế →", scale=alt.Scale(domain=[0, x_max]),
               axis=alt.Axis(format="%", tickCount=5))
-    y = alt.Y("expected_revenue_at_risk:Q", title="Tiền rủi ro kỳ vọng (USD) →",
+    y = alt.Y(**F(MONEY, "Q"), title="Tiền rủi ro kỳ vọng (USD) →",
               scale=alt.Scale(domain=[0, y_max]), axis=alt.Axis(format="~s", tickCount=5))
-    zone = alt.Chart(pd.DataFrame({"x": [x_mid], "x2": [x_max], "y": [y_mid], "y2": [y_max]})).mark_rect(
-        color="#FDECEC", opacity=.7).encode(x="x:Q", x2="x2:Q", y="y:Q", y2="y2:Q")
-    vline = alt.Chart(pd.DataFrame({"v": [x_mid]})).mark_rule(strokeDash=[4, 4], color="#BDBDBD").encode(x="v:Q")
-    hline = alt.Chart(pd.DataFrame({"v": [y_mid]})).mark_rule(strokeDash=[4, 4], color="#BDBDBD").encode(y="v:Q")
-    corners = pd.DataFrame({
-        "x": [x_max - 0.01, 0.01], "y": [y_max * 0.97, y_max * 0.97],
-        "t": ["ƯU TIÊN XỬ LÝ", "ÍT TRỄ NHƯNG MẤT NHIỀU TIỀN"],
-        "align": ["right", "left"], "c": [ACCENT, MUTED]})
-    corner_r = alt.Chart(corners[corners["align"] == "right"]).mark_text(
-        align="right", baseline="middle", fontSize=11, font="Inter", fontWeight=700).encode(
-        x="x:Q", y="y:Q", text="t:N", color=alt.Color("c:N", scale=None))
-    corner_l = alt.Chart(corners[corners["align"] == "left"]).mark_text(
-        align="left", baseline="middle", fontSize=11, font="Inter", fontWeight=700).encode(
-        x="x:Q", y="y:Q", text="t:N", color=alt.Color("c:N", scale=None))
+    xq, yq = alt.X(**F("Tỷ lệ trễ thực tế", "Q")), alt.Y(**F(MONEY, "Q"))
+    zone = alt.Chart(pd.DataFrame({"Từ tỷ lệ": [x_mid], "Đến tỷ lệ": [x_max], "Từ tiền": [y_mid], "Đến tiền": [y_max]})
+                     ).mark_rect(color="#FDECEC", opacity=.7).encode(
+        x=alt.X(**F("Từ tỷ lệ", "Q")), x2=alt.X2(field="Đến tỷ lệ"),
+        y=alt.Y(**F("Từ tiền", "Q")), y2=alt.Y2(field="Đến tiền"))
+    vline = alt.Chart(pd.DataFrame({"Tỷ lệ trễ chung": [x_mid]})).mark_rule(
+        strokeDash=[4, 4], color="#BDBDBD").encode(x=alt.X(**F("Tỷ lệ trễ chung", "Q")))
+    hline = alt.Chart(pd.DataFrame({"Trung vị tiền rủi ro": [y_mid]})).mark_rule(
+        strokeDash=[4, 4], color="#BDBDBD").encode(y=alt.Y(**F("Trung vị tiền rủi ro", "Q")))
+    corners = pd.DataFrame({"Vị trí x": [x_max - 0.01, 0.01], "Vị trí y": [y_max * 0.97, y_max * 0.97],
+                            "Nhãn vùng": ["ƯU TIÊN XỬ LÝ", "ÍT TRỄ NHƯNG MẤT NHIỀU TIỀN"]})
+    cpos = dict(x=alt.X(**F("Vị trí x", "Q")), y=alt.Y(**F("Vị trí y", "Q")), text=alt.Text(**F("Nhãn vùng", "N")))
+    corner_r = alt.Chart(corners.iloc[[0]]).mark_text(align="right", baseline="middle", fontSize=11, font="Inter",
+                                                      fontWeight=700, color=ACCENT).encode(**cpos)
+    corner_l = alt.Chart(corners.iloc[[1]]).mark_text(align="left", baseline="middle", fontSize=11, font="Inter",
+                                                      fontWeight=700, color=MUTED).encode(**cpos)
     dots = alt.Chart(d).mark_circle(opacity=.9, stroke="#FFFFFF", strokeWidth=1).encode(
-        x=x, y=y, size=alt.Size("n_orders:Q", scale=alt.Scale(range=[30, 700]), legend=None),
-        color=alt.Color("risk_tier:N", scale=alt.Scale(domain=list(TIER_COLOR), range=list(TIER_COLOR.values())),
-                        legend=None), tooltip=tip)
-    lab_l = alt.Chart(top_lab[top_lab["actual_late_rate"] <= 0.7]).mark_text(
-        align="left", dx=12, dy=-4, fontSize=11, font="Inter", color=INK).encode(
-        x="actual_late_rate:Q", y="expected_revenue_at_risk:Q", text="short:N")
-    lab_r = alt.Chart(top_lab[top_lab["actual_late_rate"] > 0.7]).mark_text(
-        align="right", dx=-12, dy=-4, fontSize=11, font="Inter", color=INK).encode(
-        x="actual_late_rate:Q", y="expected_revenue_at_risk:Q", text="short:N")
+        x=x, y=y, size=alt.Size(**F("Số đơn", "Q"), scale=alt.Scale(range=[30, 700]), legend=None),
+        color=alt.Color(**F("Mức rủi ro", "N"), scale=alt.Scale(domain=list(TIER_VI_COLOR),
+                        range=list(TIER_VI_COLOR.values())), legend=None), tooltip=tip)
+    lab = dict(x=xq, y=yq, text=alt.Text(**F("Tuyến", "N")))
+    lab_l = alt.Chart(top_lab[top_lab["Tỷ lệ trễ thực tế"] <= 0.7]).mark_text(
+        align="left", dx=12, dy=-4, fontSize=11, font="Inter", color=INK).encode(**lab)
+    lab_r = alt.Chart(top_lab[top_lab["Tỷ lệ trễ thực tế"] > 0.7]).mark_text(
+        align="right", dx=-12, dy=-4, fontSize=11, font="Inter", color=INK).encode(**lab)
     return clean(alt.layer(zone, vline, hline, corner_r, corner_l, dots, lab_l, lab_r), 540)
 
 
 def heatmap(d):
     """23 khu vực x 4 phương thức. Ô xám nhạt = tuyến thiếu dữ liệu."""
-    d = d.copy()
     reg_order = (d.groupby("order_region")
                   .apply(lambda g: g["n_late"].sum() / max(g["n_base"].sum(), 1), include_groups=False)
                   .sort_values(ascending=False).index.tolist())
     modes = [m for m in MODE_ORDER if m in set(d["shipping_mode"])]
-    d["txt"] = d["actual_late_rate"].map(lambda v: "" if pd.isna(v) else f"{v * 100:.0f}")
-    d["dark"] = d["actual_late_rate"] > 0.7
-    d["ok"] = d["risk_tier"] != "Insufficient data"
+    d = d[["route_name", "order_region", "shipping_mode", "tier_vi", "risk_tier", "actual_late_rate",
+           "n_orders"]].rename(columns={
+        "route_name": "Tuyến", "order_region": "Khu vực", "shipping_mode": "Phương thức", "tier_vi": "Mức rủi ro",
+        "actual_late_rate": "Tỷ lệ trễ thực tế", "n_orders": "Số đơn"})
+    d["Tỷ lệ trễ thực tế"] = d["Tỷ lệ trễ thực tế"].round(4)
+    d["Nhãn"] = d["Tỷ lệ trễ thực tế"].map(lambda v: "" if pd.isna(v) else f"{v * 100:.0f}")
+    d["Chữ trắng"] = d["Tỷ lệ trễ thực tế"] > 0.7
+    d["Đủ dữ liệu"] = d["risk_tier"] != "Insufficient data"
+    d = d.drop(columns="risk_tier")
     base = alt.Chart(d).encode(
-        x=alt.X("shipping_mode:N", sort=modes, title=None,
+        x=alt.X(**F("Phương thức", "N"), sort=modes, title=None,
                 axis=alt.Axis(orient="top", labelAngle=0, labelColor=INK, labelFontSize=11.5,
                               labelExpr="replace(datum.label, ' Class', '')")),
-        y=alt.Y("order_region:N", sort=reg_order, title=None,
+        y=alt.Y(**F("Khu vực", "N"), sort=reg_order, title=None,
                 axis=alt.Axis(labelColor=INK, labelFontSize=11.5, labelOverlap=False, labelLimit=140)))
     cells = base.mark_rect(cornerRadius=5, stroke="#FFFFFF", strokeWidth=2).encode(
-        color=alt.condition("datum.ok", alt.Color("actual_late_rate:Q", legend=None,
+        color=alt.condition("datum['Đủ dữ liệu']", alt.Color(**F("Tỷ lệ trễ thực tế", "Q"), legend=None,
                             scale=alt.Scale(domain=[0.3, 1], range=["#FFF1F0", ACCENT, "#9F1D17"])),
                             alt.value("#F3F3F3")),
-        tooltip=[alt.Tooltip("route_name:N", title="Tuyến"), alt.Tooltip("tier_vi:N", title="Mức"),
-                 alt.Tooltip("actual_late_rate:Q", title="Trễ thực tế", format=".1%"),
-                 alt.Tooltip("n_orders:Q", title="Số đơn", format=",")])
+        tooltip=[alt.Tooltip(**F("Tuyến", "N")), alt.Tooltip(**F("Mức rủi ro", "N")),
+                 alt.Tooltip(**F("Tỷ lệ trễ thực tế", "Q"), format=".1%"),
+                 alt.Tooltip(**F("Số đơn", "Q"), format=",")])
     text = base.mark_text(fontSize=10.5, font="Inter", fontWeight=500).encode(
-        text="txt:N", color=alt.condition("datum.dark", alt.value("#FFFFFF"), alt.value(INK)))
+        text=alt.Text(**F("Nhãn", "N")),
+        color=alt.condition("datum['Chữ trắng']", alt.value("#FFFFFF"), alt.value(INK)))
     return clean(alt.layer(cells, text), 23 * 23).configure_axisY(grid=False)
 
 
