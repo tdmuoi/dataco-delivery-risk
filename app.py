@@ -7,7 +7,7 @@ import joblib
 import pandas as pd
 import streamlit as st
 
-from overview import apply_style, page_overview, sidebar_nav
+from overview import ACCENT, F, INK, apply_style, card_header, clean, page_overview, sidebar_nav, vn_pct
 from ranking import page_ranking
 from chatbot import page_chatbot
 
@@ -120,35 +120,108 @@ def page_routes():
 
 
 # ---------------------------------------------------------------- Trang 2
+LEVEL_COLOR = {"CAO": ACCENT, "TRUNG BÌNH": "#F5A3A1", "THẤP": "#CFCFCF"}
+
+PREDICT_CSS = f"""
+<style>
+.pd-group {{ font-size:15px; font-weight:600; color:{INK}; margin-bottom:6px; }}
+.pd-calc  {{ font-size:14px; color:{INK}; margin-top:6px; }}
+.pd-dot   {{ display:inline-block; width:14px; height:14px; border-radius:50%; margin-right:10px; vertical-align:middle; }}
+.pd-gauge {{ position:relative; height:12px; border-radius:999px; background:#F3F3F3; margin:18px 0 6px 0; }}
+.pd-gauge .fill {{ position:absolute; left:0; top:0; bottom:0; border-radius:999px; background:{ACCENT}; }}
+.pd-gauge .mark {{ position:absolute; top:-4px; bottom:-4px; width:2px; background:#FFFFFF; }}
+.pd-scale {{ position:relative; height:16px; font-size:12px; color:{INK}; }}
+.pd-scale span {{ position:absolute; transform:translateX(-50%); }}
+.pd-note  {{ font-size:13.5px; color:{INK}; line-height:1.55; margin-top:6px; }}
+[class*="st-key-card_in"] {{ min-height: 470px; }}
+.st-key-card_kpi_p, .st-key-card_kpi_lv, .st-key-card_kpi_money {{ min-height: 130px !important; }}
+.st-key-card_gauge, .st-key-card_whatif {{ min-height: 300px; }}
+.st-key-predict_btn button {{ background:{ACCENT}; border-color:{ACCENT}; color:#FFFFFF; }}
+.st-key-predict_btn button:hover {{ background:#D93C3C; border-color:#D93C3C; color:#FFFFFF; }}
+</style>
+"""
+
+
+def vn_money(x):
+    return f"{x:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".") + " USD"
+
+
+def result_card(key, label, value_html, pill=None):
+    with st.container(key=key):
+        st.markdown(f'<div class="kpi-label">{label}</div><div class="kpi-value">{value_html}</div>'
+                    + (f'<span class="kpi-pill">{pill}</span>' if pill else ""), unsafe_allow_html=True)
+
+
+def gauge_html(p):
+    marks = "".join(f'<div class="mark" style="left:{x}%"></div>' for x in (30, 60))
+    scale = "".join(f'<span style="left:{x}%">{t}</span>' for x, t in
+                    ((15, "Thấp"), (45, "Trung bình"), (80, "Cao")))
+    return (f'<div class="pd-gauge"><div class="fill" style="width:{p * 100:.1f}%"></div>{marks}</div>'
+            f'<div class="pd-scale">{scale}</div>')
+
+
+def whatif_chart(wi, mode):
+    d = pd.DataFrame({
+        "Phương thức": wi["shipping_mode"],
+        "Ngày dự kiến": wi["scheduled_shipping_days"],
+        "Xác suất trễ": wi["p_late"].round(4),
+        "Doanh thu kỳ vọng rủi ro (USD)": wi["Doanh thu kỳ vọng rủi ro"].round(2),
+    })
+    d["Phương thức và cam kết"] = d["Phương thức"] + " - " + d["Ngày dự kiến"].astype(str) + " ngày"
+    d["Đang chọn"] = d["Phương thức"] == mode
+    d["Nhãn"] = d["Xác suất trễ"].map(vn_pct)
+    order = d.sort_values("Xác suất trễ")["Phương thức và cam kết"].tolist()
+    base = alt.Chart(d).encode(y=alt.Y(**F("Phương thức và cam kết", "N"), sort=order, title=None,
+                                       axis=alt.Axis(labelLimit=260, labelFontSize=12.5, labelColor=INK, labelPadding=8)))
+    track = base.mark_bar(cornerRadius=9, size=20, color="#F3F3F3").encode(
+        x=alt.X(field="nen", type="quantitative", axis=None, scale=alt.Scale(domain=[0, 1]))).transform_calculate(nen="1")
+    bars = base.mark_bar(cornerRadius=9, size=20).encode(
+        x=alt.X(**F("Xác suất trễ", "Q"), axis=None, scale=alt.Scale(domain=[0, 1])),
+        color=alt.condition("datum['Đang chọn']", alt.value(ACCENT), alt.value("#F2A6A4")),
+        tooltip=[alt.Tooltip(**F("Phương thức", "N")),
+                 alt.Tooltip(**F("Ngày dự kiến", "Q")),
+                 alt.Tooltip(**F("Xác suất trễ", "Q"), format=".1%"),
+                 alt.Tooltip(**F("Doanh thu kỳ vọng rủi ro (USD)", "Q"), format=",.2f")])
+    # nhãn nằm trong cột nếu cột đủ dài, ngược lại nằm ngay sau cột
+    inside = base.transform_filter("datum['Xác suất trễ'] >= 0.12").mark_text(
+        align="right", dx=-8, color="#FFFFFF", fontWeight=600, font="Inter", fontSize=12).encode(
+        x=alt.X(**F("Xác suất trễ", "Q")), text=alt.Text(**F("Nhãn", "N")))
+    outside = base.transform_filter("datum['Xác suất trễ'] < 0.12").mark_text(
+        align="left", dx=6, color=INK, fontWeight=600, font="Inter", fontSize=12).encode(
+        x=alt.X(**F("Xác suất trễ", "Q")), text=alt.Text(**F("Nhãn", "N")))
+    return clean(alt.layer(track, bars, inside, outside), 230)
+
+
 def page_predict():
-    st.title("Dự báo rủi ro giao trễ cho đơn hàng mới")
-    st.caption(f"Mô hình: {opt['best_model']} (đã huấn luyện ở mục 3.4). Nhập thông tin đơn rồi xem xác suất giao trễ.")
+    st.markdown(PREDICT_CSS, unsafe_allow_html=True)
+    st.markdown('<div class="ov-title">Dự báo đơn mới</div>', unsafe_allow_html=True)
+    st.write("")
     model = load_model()
 
     col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("**Giao hàng và khu vực**")
+    with col1, st.container(key="card_in1"):
+        st.markdown('<div class="pd-group">Giao hàng và khu vực</div>', unsafe_allow_html=True)
         mode = st.selectbox("Phương thức vận chuyển", opt["shipping_mode"],
                             index=opt["shipping_mode"].index("Standard Class") if "Standard Class" in opt["shipping_mode"] else 0)
         days = opt["mode_days"][mode]
-        st.text_input("Số ngày giao dự kiến (tự suy ra)", f"{days} ngày", disabled=True)
+        st.text_input("Số ngày giao dự kiến", f"{days} ngày", disabled=True)
         region = st.selectbox("Khu vực đặt hàng", opt["order_region"])
         market = opt["region_market"].get(region, opt["market"][0])
-        st.text_input("Thị trường (tự suy ra)", market, disabled=True)
+        st.text_input("Thị trường", market, disabled=True)
         country = st.selectbox("Quốc gia", opt["region_country"].get(region, opt["order_country"]))
-    with col2:
-        st.markdown("**Sản phẩm và khách hàng**")
+    with col2, st.container(key="card_in2"):
+        st.markdown('<div class="pd-group">Sản phẩm và khách hàng</div>', unsafe_allow_html=True)
         category = st.selectbox("Nhóm hàng", opt["category_name"])
         dept = opt["category_department"].get(category, opt["department_name"][0])
-        st.text_input("Bộ phận (tự suy ra)", dept, disabled=True)
+        st.text_input("Bộ phận", dept, disabled=True)
         segment = st.selectbox("Loại khách hàng", opt["customer_segment"])
         payment = st.selectbox("Hình thức thanh toán", opt["payment_type"])
-    with col3:
-        st.markdown("**Giá trị và thời điểm đặt**")
+    with col3, st.container(key="card_in3"):
+        st.markdown('<div class="pd-group">Giá trị và thời điểm đặt</div>', unsafe_allow_html=True)
         qty = st.number_input("Số lượng", 1, 5, 1)
-        price = st.number_input("Đơn giá", 9.99, 1999.99, 59.99, step=1.0)
+        price = st.number_input("Đơn giá (USD)", 9.99, 1999.99, 59.99, step=1.0)
         disc = st.slider("Tỷ lệ giảm giá", 0.0, 0.25, 0.0, 0.01, format="%.2f")
-        d = st.date_input("Ngày đặt", datetime.now().date())
+        d = st.date_input("Ngày đặt", datetime.now().date(), format="DD/MM/YYYY")
         t = st.time_input("Giờ đặt", datetime.now().time().replace(second=0, microsecond=0))
 
     sales = qty * price
@@ -159,50 +232,46 @@ def page_predict():
            "scheduled_shipping_days": days, "quantity": qty, "unit_price": price, "sales": sales,
            "discount_rate": disc, "order_item_total": total, "order_month": d.month,
            "order_day_of_week": dow, "order_is_weekend": int(dow in (1, 7)), "order_hour": t.hour}
-    st.caption(f"Doanh số = {sales:,.2f} | Tổng tiền dòng hàng = {total:,.2f} (tự tính)")
 
-    if st.button("Dự báo", type="primary"):
-        p = float(model.predict_proba(pd.DataFrame([row])[FEATURES])[0, 1])
-        name, icon = level(p)
-        a, b, c = st.columns(3)
-        a.metric("Xác suất giao trễ", f"{p:.1%}")
-        b.metric("Mức rủi ro", f"{icon} {name}")
-        c.metric("Doanh thu kỳ vọng rủi ro", f"{p * total:,.2f}")
-        st.progress(min(max(p, 0.0), 1.0))
+    left, right = st.columns([3, 1], vertical_alignment="center")
+    left.markdown(f'<div class="pd-calc">Doanh số <b>{vn_money(sales)}</b> - tổng tiền sau giảm giá <b>{vn_money(total)}</b></div>',
+                  unsafe_allow_html=True)
+    if right.button("Dự báo", type="primary", width="stretch", key="predict_btn"):
+        st.session_state["pred_row"] = row
+    if st.session_state.get("pred_row") != row:
+        return
 
-        st.subheader("So sánh nếu đổi phương thức vận chuyển")
-        rows = [{**row, "shipping_mode": m, "scheduled_shipping_days": opt["mode_days"][m]} for m in opt["shipping_mode"]]
-        wi = pd.DataFrame(rows)
-        wi["p_late"] = model.predict_proba(wi[FEATURES])[:, 1]
-        wi["Doanh thu kỳ vọng rủi ro"] = wi["p_late"] * wi["order_item_total"]
-        ch = alt.Chart(wi).mark_bar().encode(
-            x=alt.X("shipping_mode:N", title=None, sort=None),
-            y=alt.Y("p_late:Q", title="Xác suất trễ", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
-            color=alt.condition(alt.datum.shipping_mode == mode, alt.value("#1f77b4"), alt.value("#c7c7c7")),
-            tooltip=["shipping_mode", alt.Tooltip("p_late:Q", format=".1%")])
-        st.altair_chart(ch, use_container_width=True)
-        st.dataframe(wi.assign(p_late=wi["p_late"] * 100)[["shipping_mode", "scheduled_shipping_days", "p_late", "Doanh thu kỳ vọng rủi ro"]],
-                     hide_index=True, use_container_width=True, column_config={
-                         "shipping_mode": "Phương thức", "scheduled_shipping_days": "Ngày dự kiến",
-                         "p_late": st.column_config.NumberColumn("Xác suất trễ (%)", format="%.1f")})
-        st.info("Lưu ý: First Class gần như luôn trễ trong dữ liệu gốc, và mô hình chỉ hơn baseline theo "
-                "phương thức vận chuyển khoảng 0,036 ROC-AUC. Kết quả dùng để tham khảo và xếp hạng ưu tiên, "
-                "không phải cam kết giao hàng.")
+    p = float(model.predict_proba(pd.DataFrame([row])[FEATURES])[0, 1])
+    name, _ = level(p)
+    st.write("")
+    a, b, c = st.columns(3)
+    with a:
+        result_card("card_kpi_p", "Xác suất giao trễ", vn_pct(p))
+    with b:
+        result_card("card_kpi_lv", "Mức rủi ro",
+                    f'<span class="pd-dot" style="background:{LEVEL_COLOR[name]}"></span>{name.capitalize()}')
+    with c:
+        result_card("card_kpi_money", "Doanh thu kỳ vọng rủi ro", vn_money(p * total).replace(" USD", "<small>USD</small>"))
 
+    rows = [{**row, "shipping_mode": m, "scheduled_shipping_days": opt["mode_days"][m]} for m in opt["shipping_mode"]]
+    wi = pd.DataFrame(rows)
+    wi["p_late"] = model.predict_proba(wi[FEATURES])[:, 1]
+    wi["Doanh thu kỳ vọng rủi ro"] = wi["p_late"] * wi["order_item_total"]
 
-# ---------------------------------------------------------------- Trang 3
-def page_about():
-    st.title("Giới thiệu")
-    st.markdown("""
-Ứng dụng này dùng kết quả học máy của đồ án *Hệ thống đánh giá và xếp hạng rủi ro giao hàng trên nền tảng Data Lakehouse*.
-
-- **Dữ liệu**: bảng `gold.wide_order_items` trên BigQuery (180.519 dòng hàng, bỏ đơn đã hủy).
-- **Mô hình**: so sánh Logistic Regression, Random Forest và XGBoost; chia 80/20 theo thời gian; chọn mô hình tốt nhất.
-- **18 biến đầu vào**: 8 biến phân loại (phương thức, thị trường, khu vực, quốc gia, nhóm hàng, bộ phận, loại khách, thanh toán) và 10 biến số (ngày giao dự kiến, số lượng, đơn giá, doanh số, giảm giá, tổng tiền, tháng, thứ, cuối tuần, giờ).
-- **Doanh thu kỳ vọng rủi ro** = xác suất trễ × tổng tiền dòng hàng.
-- **Mức rủi ro đơn**: Thấp (dưới 30%), Trung bình (30% đến 60%), Cao (từ 60%).
-""")
-    st.json(opt["versions"])
+    st.write("")
+    g, w = st.columns([2, 3])
+    with g, st.container(key="card_gauge"):
+        card_header("Vị trí trên thang rủi ro")
+        st.markdown(gauge_html(p), unsafe_allow_html=True)
+        best = wi.loc[wi["p_late"].idxmin()]
+        tip = ("Đây đã là phương thức ít rủi ro nhất cho đơn này." if best["shipping_mode"] == mode else
+               f'Đổi sang <b>{best["shipping_mode"]}</b> thì xác suất trễ còn <b>{vn_pct(best["p_late"])}</b>.')
+        st.markdown(f'<div class="pd-note" style="margin-top:22px">{tip}</div>'
+                    '<div class="pd-note">Kết quả dùng để tham khảo và xếp ưu tiên, không phải cam kết giao hàng. '
+                    'First Class gần như luôn trễ trong dữ liệu gốc.</div>', unsafe_allow_html=True)
+    with w, st.container(key="card_whatif"):
+        card_header("Nếu đổi phương thức vận chuyển")
+        st.altair_chart(whatif_chart(wi, mode), width="stretch")
 
 
 def main():
@@ -215,7 +284,6 @@ def main():
         "Xếp hạng tuyến": (":material/route:", page_ranking),
         "Dự báo đơn mới": (":material/online_prediction:", page_predict),
         "Trợ lý dữ liệu": (":material/smart_toy:", page_chatbot),
-        "Giới thiệu": (":material/info:", page_about),
     })
     page()
 
