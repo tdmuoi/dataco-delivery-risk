@@ -300,3 +300,4 @@ elif __name__ == "__main__":
     import subprocess
     import sys
     subprocess.run([sys.executable, "-m", "streamlit", "run", str(Path(__file__).resolve())])
+            
