@@ -502,3 +502,4 @@ def page_chatbot():
                     status.update(label="Không hoàn thành", state="error")
             show_reply(msg)
         history.append(msg)
+      
