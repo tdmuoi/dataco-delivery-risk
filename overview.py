@@ -328,16 +328,22 @@ def clean(chart, height):
             .configure_legend(disable=True))
 
 
-def spark(df, field, highlight_last=True):
+def F(name, kind):
+    """Trường dữ liệu theo tên tiếng Việt (có dấu, có khoảng trắng). kind: Q số, N chữ, T thời gian."""
+    return {"field": name, "type": {"Q": "quantitative", "N": "nominal", "T": "temporal"}[kind]}
+
+
+def spark(df, field, label, highlight_last=True):
     """Cột nhỏ trong thẻ KPI (12 tháng gần nhất của khoảng đang lọc)."""
-    d = df.tail(12).reset_index(drop=True)
-    d["is_last"] = d.index == len(d) - 1
+    d = df.tail(12)[["year_month", field]].rename(columns={"year_month": "Tháng", field: label}).reset_index(drop=True)
+    d[label] = d[label].round(4)
+    d["Tháng gần nhất"] = d.index == len(d) - 1
     return clean(alt.Chart(d).mark_bar(cornerRadius=3, size=9).encode(
-        x=alt.X("year_month:N", axis=None, sort=None),
-        y=alt.Y(f"{field}:Q", axis=None, scale=alt.Scale(zero=False, padding=4)),
-        color=alt.condition("datum.is_last" if highlight_last else "false",
+        x=alt.X(**F("Tháng", "N"), axis=None, sort=None),
+        y=alt.Y(**F(label, "Q"), axis=None, scale=alt.Scale(zero=False, padding=4)),
+        color=alt.condition("datum['Tháng gần nhất']" if highlight_last else "false",
                             alt.value(ACCENT), alt.value(SOFT)),
-        tooltip=[alt.Tooltip("year_month:N", title="Tháng"), alt.Tooltip(f"{field}:Q", format=",.3~f")],
+        tooltip=[alt.Tooltip(**F("Tháng", "N")), alt.Tooltip(**F(label, "Q"), format=",.3~f")],
     ), 46)
 
 
@@ -354,72 +360,86 @@ def to_period(monthly, by_quarter):
 
 def trend_chart(d, by_quarter):
     """Đường tỷ lệ trễ: vùng tô mờ, chấm tròn, các vạch đỏ đứt nét thả xuống trục."""
-    d = d.dropna(subset=["late_rate"]).copy()
+    d = d.dropna(subset=["late_rate"])
     lo = max(0.0, round(d["late_rate"].min() - 0.10, 1))
     hi = min(1.0, round(d["late_rate"].max() + 0.05, 1))
-    d["base"] = lo
-    peak = d["late_rate"].idxmax()
-    d["is_peak"] = d.index == peak
-    d["peak_txt"] = d["late_rate"].map(lambda v: vn_pct(v))
+    d = d[["date", "late_rate", "n_orders"]].rename(
+        columns={"date": "Kỳ", "late_rate": "Tỷ lệ trễ", "n_orders": "Số đơn"}).reset_index(drop=True)
+    d["Tỷ lệ trễ"] = d["Tỷ lệ trễ"].round(4)
+    d["Đáy trục"] = lo
+    d["Cao nhất"] = d.index == d["Tỷ lệ trễ"].idxmax()
+    d["Nhãn"] = d["Tỷ lệ trễ"].map(lambda v: vn_pct(v))
     fmt = "Q%q/%y" if by_quarter else "%m/%y"
-    x = alt.X("date:T", title=None, axis=alt.Axis(format=fmt, labelAngle=0, tickCount=8 if not by_quarter else len(d)))
-    y = alt.Y("late_rate:Q", title=None, axis=alt.Axis(format="%", tickCount=5), scale=alt.Scale(domain=[lo, hi]))
-    tip = [alt.Tooltip("date:T", title="Kỳ", format="%m/%Y"),
-           alt.Tooltip("late_rate:Q", title="Tỷ lệ trễ", format=".1%"),
-           alt.Tooltip("n_orders:Q", title="Số đơn", format=",")]
+    x = alt.X(**F("Kỳ", "T"), title=None,
+              axis=alt.Axis(format=fmt, labelAngle=0, tickCount=8 if not by_quarter else len(d)))
+    y = alt.Y(**F("Tỷ lệ trễ", "Q"), title=None, axis=alt.Axis(format="%", tickCount=5),
+              scale=alt.Scale(domain=[lo, hi]))
+    yy = alt.Y(**F("Tỷ lệ trễ", "Q"))
+    tip = [alt.Tooltip(**F("Kỳ", "T"), format="%m/%Y"),
+           alt.Tooltip(**F("Tỷ lệ trễ", "Q"), format=".1%"),
+           alt.Tooltip(**F("Số đơn", "Q"), format=",")]
     base = alt.Chart(d).encode(x=x)
     area = base.mark_area(interpolate="monotone", line=False, color=alt.Gradient(
         gradient="linear", x1=1, x2=1, y1=1, y2=0,
         stops=[alt.GradientStop(color="#FFFFFF", offset=0), alt.GradientStop(color="#FBD5D4", offset=1)])
-    ).encode(y=y, y2="base:Q")
-    drops = base.mark_rule(strokeDash=[3, 3], color=ACCENT, opacity=.45, strokeWidth=1).encode(y="late_rate:Q", y2="base:Q")
-    line = base.mark_line(interpolate="monotone", color=ACCENT, strokeWidth=2.5).encode(y="late_rate:Q")
+    ).encode(y=y, y2=alt.Y2(field="Đáy trục"))
+    drops = base.mark_rule(strokeDash=[3, 3], color=ACCENT, opacity=.45, strokeWidth=1).encode(
+        y=yy, y2=alt.Y2(field="Đáy trục"))
+    line = base.mark_line(interpolate="monotone", color=ACCENT, strokeWidth=2.5).encode(y=yy)
     dots = base.mark_circle(size=55 if not by_quarter else 90, color=ACCENT, opacity=1,
-                            stroke="#FFFFFF", strokeWidth=2).encode(y="late_rate:Q", tooltip=tip)
-    halo = base.transform_filter("datum.is_peak").mark_circle(size=380, color=ACCENT, opacity=.18).encode(y="late_rate:Q")
-    tag = base.transform_filter("datum.is_peak").mark_text(dy=-18, color=ACCENT, fontWeight=600, font="Inter",
-                                                            fontSize=12).encode(y="late_rate:Q", text="peak_txt:N")
+                            stroke="#FFFFFF", strokeWidth=2).encode(y=yy, tooltip=tip)
+    halo = base.transform_filter("datum['Cao nhất']").mark_circle(size=380, color=ACCENT, opacity=.18).encode(y=yy)
+    tag = base.transform_filter("datum['Cao nhất']").mark_text(
+        dy=-18, color=ACCENT, fontWeight=600, font="Inter", fontSize=12).encode(y=yy, text=alt.Text(**F("Nhãn", "N")))
     return clean(alt.layer(area, drops, line, halo, dots, tag), 280)
 
 
 def mode_chart(s, mode_days):
-    d = s.copy()
-    d["label"] = d["shipping_mode"] + d["shipping_mode"].map(
+    d = s[["shipping_mode", "late_rate", "avg_delay", "n_orders"]].rename(columns={
+        "shipping_mode": "Phương thức", "late_rate": "Tỷ lệ trễ", "avg_delay": "Trễ trung bình (ngày)",
+        "n_orders": "Số đơn"})
+    d = d.round({"Tỷ lệ trễ": 4, "Trễ trung bình (ngày)": 2})
+    d["Phương thức và cam kết"] = d["Phương thức"] + d["Phương thức"].map(
         lambda x: f" - cam kết {mode_days[x]} ngày" if x in mode_days else "")
-    d["is_top"] = d["late_rate"] == d["late_rate"].max()
-    d["txt"] = d["late_rate"].map(vn_pct)
-    order = d.sort_values("late_rate", ascending=False)["label"].tolist()
-    base = alt.Chart(d).encode(y=alt.Y("label:N", sort=order, title=None,
+    d["Cao nhất"] = d["Tỷ lệ trễ"] == d["Tỷ lệ trễ"].max()
+    d["Nhãn"] = d["Tỷ lệ trễ"].map(vn_pct)
+    order = d.sort_values("Tỷ lệ trễ", ascending=False)["Phương thức và cam kết"].tolist()
+    base = alt.Chart(d).encode(y=alt.Y(**F("Phương thức và cam kết", "N"), sort=order, title=None,
                                        axis=alt.Axis(labelLimit=260, labelFontSize=12.5, labelColor=INK, labelPadding=8)))
-    track = base.mark_bar(cornerRadius=9, size=18, color="#F3F3F3").encode(x=alt.X("one:Q", axis=None)).transform_calculate(one="1")
+    track = base.mark_bar(cornerRadius=9, size=18, color="#F3F3F3").encode(
+        x=alt.X(field="nen", type="quantitative", axis=None)).transform_calculate(nen="1")
     bars = base.mark_bar(cornerRadius=9, size=18).encode(
-        x=alt.X("late_rate:Q", axis=None, scale=alt.Scale(domain=[0, 1])),
-        color=alt.condition("datum.is_top", alt.value(ACCENT), alt.value("#F2A6A4")),
-        tooltip=[alt.Tooltip("shipping_mode:N", title="Phương thức"),
-                 alt.Tooltip("late_rate:Q", title="Tỷ lệ trễ", format=".1%"),
-                 alt.Tooltip("avg_delay:Q", title="Trễ TB (ngày)", format="+.2f"),
-                 alt.Tooltip("n_orders:Q", title="Số đơn", format=",")])
+        x=alt.X(**F("Tỷ lệ trễ", "Q"), axis=None, scale=alt.Scale(domain=[0, 1])),
+        color=alt.condition("datum['Cao nhất']", alt.value(ACCENT), alt.value("#F2A6A4")),
+        tooltip=[alt.Tooltip(**F("Phương thức", "N")),
+                 alt.Tooltip(**F("Tỷ lệ trễ", "Q"), format=".1%"),
+                 alt.Tooltip(**F("Trễ trung bình (ngày)", "Q"), format="+.2f"),
+                 alt.Tooltip(**F("Số đơn", "Q"), format=",")])
     text = base.mark_text(align="right", dx=-8, color="#FFFFFF", fontWeight=600, font="Inter", fontSize=12).encode(
-        x="late_rate:Q", text="txt:N")
+        x=alt.X(**F("Tỷ lệ trễ", "Q")), text=alt.Text(**F("Nhãn", "N")))
     return clean(alt.layer(track, bars, text), 300)
 
 
 def market_chart(s):
-    d = s.sort_values("revenue_at_risk", ascending=False).copy()
-    total = d["revenue_at_risk"].sum()
-    d["share"] = d["revenue_at_risk"] / total if total else 0
-    d["txt"] = d["share"].map(lambda x: vn_pct(x, 0))
-    d["is_top"] = d["revenue_at_risk"] == d["revenue_at_risk"].max()
-    base = alt.Chart(d).encode(y=alt.Y("market:N", sort=d["market"].tolist(), title=None,
+    d = s.sort_values("revenue_at_risk", ascending=False)[["market", "revenue_at_risk", "late_rate"]].rename(
+        columns={"market": "Thị trường", "revenue_at_risk": "Doanh thu chịu rủi ro (USD)", "late_rate": "Tỷ lệ trễ"})
+    money = "Doanh thu chịu rủi ro (USD)"
+    d = d.round({money: 0, "Tỷ lệ trễ": 4})
+    total = d[money].sum()
+    d["Tỷ trọng"] = d[money] / total if total else 0
+    d["Tỷ trọng"] = d["Tỷ trọng"].round(4)
+    d["Nhãn"] = d["Tỷ trọng"].map(lambda x: vn_pct(x, 0))
+    d["Cao nhất"] = d[money] == d[money].max()
+    base = alt.Chart(d).encode(y=alt.Y(**F("Thị trường", "N"), sort=d["Thị trường"].tolist(), title=None,
                                        axis=alt.Axis(labelColor=INK, labelFontSize=12.5, labelPadding=8)))
     bars = base.mark_bar(cornerRadius=9, size=18).encode(
-        x=alt.X("revenue_at_risk:Q", axis=None, scale=alt.Scale(domain=[0, d["revenue_at_risk"].max() * 1.18])),
-        color=alt.condition("datum.is_top", alt.value(ACCENT), alt.value("#F2A6A4")),
-        tooltip=[alt.Tooltip("market:N", title="Thị trường"),
-                 alt.Tooltip("revenue_at_risk:Q", title="Doanh thu chịu rủi ro (USD)", format=",.0f"),
-                 alt.Tooltip("late_rate:Q", title="Tỷ lệ trễ", format=".1%")])
+        x=alt.X(**F(money, "Q"), axis=None, scale=alt.Scale(domain=[0, d[money].max() * 1.18])),
+        color=alt.condition("datum['Cao nhất']", alt.value(ACCENT), alt.value("#F2A6A4")),
+        tooltip=[alt.Tooltip(**F("Thị trường", "N")),
+                 alt.Tooltip(**F(money, "Q"), format=",.0f"),
+                 alt.Tooltip(**F("Tỷ lệ trễ", "Q"), format=".1%")])
     text = base.mark_text(align="left", dx=6, color=INK, fontSize=12, font="Inter", fontWeight=600).encode(
-        x="revenue_at_risk:Q", text="txt:N")
+        x=alt.X(**F(money, "Q")), text=alt.Text(**F("Nhãn", "N")))
     return clean(alt.layer(bars, text), 300)
 
 
@@ -448,7 +468,7 @@ def kpi_card(key, icon_name, label, value, pill, pill_grey, spark_df, spark_fiel
             f'<span class="kpi-pill{" grey" if pill_grey else ""}">{pill}</span>',
             unsafe_allow_html=True)
         if spark_df is not None and len(spark_df) > 1:
-            st.altair_chart(spark(spark_df, spark_field), width="stretch")
+            st.altair_chart(spark(spark_df, spark_field, label), width="stretch")
 
 
 def card_header(title, note=None):
